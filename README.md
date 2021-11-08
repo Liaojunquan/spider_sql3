@@ -1,0 +1,2 @@
+# spider_sql3
+爬取subscene和yifi网站的电影或电视剧字幕文件
