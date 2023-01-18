@@ -19,13 +19,15 @@ import sys
 import regexp_function
 import converter
 import traceback
+from playwright.sync_api import sync_playwright
+import gc
+
 
 conn = sqlite3.connect('info.db')
 cursor = conn.cursor()
 subtitles_save_folder = '/data/series'    # 字幕文件和文件夹存放目录，仅支持绝对路径!
+local_tmp_folder = os.path.join(subtitles_save_folder, 'tmp')
 csv_file_path = './series.csv'              # 存放电视剧imdb列表的csv文件位置，与脚本文件在同一目录下
-proxy = {'http': '127.0.0.1:7890', 'https': '127.0.0.1:7890'}       # 代理地址，使用代理软件进行翻墙
-USE_PROXY = False    # 是否使用代理的开关
 is_save_error_file = True     # 是否保存非法的字幕文件，用于debug
 
 language_dict = {                                          # 语言语种，不需要爬取的语种，使用#进行屏蔽
@@ -165,6 +167,9 @@ select_last_sql = "select episodes,createtime from series where imdb_id=? order 
 
 session = requests.session()
 url_set = set()
+playwright = sync_playwright().start()
+browser = playwright.firefox.launch(downloads_path=local_tmp_folder)
+page = browser.new_page()
 
 
 def print_and_log(msg):
@@ -216,19 +221,13 @@ def download_header():
     }
 
 
-def get_response(url, my_header, quickly=False):
-    if quickly:
-        time.sleep(1)
-    else:
-        time.sleep(6)
+def get_response(url, my_header):
+    time.sleep(8)
     res = None
     count = 0
     while count < 3:    # 3次重连机会
         try:
-            if USE_PROXY:
-                res = session.get(url, headers=my_header, proxies=proxy, timeout=15)
-            else:
-                res = session.get(url, headers=my_header, timeout=15)
+            res = session.get(url, headers=my_header, timeout=15)
         except Exception as err:
             count += 1
             print_and_log(err)
@@ -239,39 +238,6 @@ def get_response(url, my_header, quickly=False):
             if res.status_code != 200:
                 count += 1
                 print_and_log('Status code is ' + str(res.status_code) + ' Retry again!  ' + str(count))
-                if res.status_code == 403:
-                    time.sleep(8)
-                else:
-                    time.sleep(6)
-                continue
-        if res is not None and res.status_code == 200:
-            break
-    if res is None or count >= 3:
-        return None
-    else:
-        return res
-
-
-def post_response(url, my_header, post_data):
-    time.sleep(6)
-    res = None
-    count = 0
-    while count < 3:     # 3次重连机会
-        try:
-            if USE_PROXY:
-                res = session.post(url, headers=my_header, data=post_data, proxies=proxy, timeout=15)
-            else:
-                res = session.post(url, headers=my_header, data=post_data, timeout=15)
-        except Exception as err:
-            count += 1
-            print_and_log('Post connect retry again! ' + str(count))
-            print_and_log(err)
-            time.sleep(6)
-            continue
-        else:
-            if res.status_code != 200:
-                count += 1
-                print_and_log('Post status code is ' + str(res.status_code) + ' Retry again!  ' + str(count))
                 if res.status_code == 403:
                     time.sleep(8)
                 else:
@@ -361,37 +327,44 @@ def save_convert_error_file(data, file_name):
         print_and_log(err)
 
 
-def download_subtitles_file(url, language, imdb, tv_name, subtitle_id, season):
-    file_name = url.split('/')[-1] + '.zip'
-    res = None
+def download_subtitles_file(url, language, imdb, tv_name, subtitle_id):
     count = 0
-    while count < 8:
-        res = get_response(url, my_header=download_header(), quickly=True)  # 下载字幕文件zip包
-        if res is None or res.status_code != 200:
+    while count < 3:
+        time.sleep(1)
+        try:
+            page.goto(url)
+        except Exception as err:
+            print_and_log(err)
+            print_and_log(f'Error: Unable download from {url}, retry again {count}')
             count += 1
-            if res is not None:
-                print_and_log('Status Code is ' + str(res.status_code))
-            print_and_log(str(count) + '  Unable to download subtitles file!  ' + url)
-            session.cookies.clear()
-            # time.sleep(5)
-            continue
+            time.sleep(9)
         else:
-            count = 0
-            break
-    if res is None or count >= 8:
+            if 'To many requests' in page.title():
+                print_and_log('Warning: To many requests! 343')
+                time.sleep(5)
+                count += 1
+                continue
+            time.sleep(5)
+            if len(os.listdir(local_tmp_folder)) == 1:
+                break
+            else:
+                time.sleep(5)
+                if len(os.listdir(local_tmp_folder)) == 1:
+                    break
+                else:
+                    print_and_log(f'Error: Download file not found, retry again {count}')
+                    count += 1
+                    time.sleep(9)
+                    os.system('rm -f ' + os.path.join(local_tmp_folder, '*'))
+    if count >= 3:
+        print_and_log(f'Error: Unable download from {url}, ignore!')
         return None
+    file_name = os.listdir(local_tmp_folder)[0]
     try:
-        with open(os.path.join(subtitles_save_folder, 'tmp', file_name), 'wb') as f:       # 字幕压缩包保存到E:/data/series/tmp目录下
-            f.write(res.content)
-    except Exception as err:
-        print_and_log('Error: Unable save compress file to disk!!!')
-        print_and_log(err)
-        return None
-    try:
-        zip_file = zipfile.ZipFile(os.path.join(subtitles_save_folder, 'tmp', file_name), 'r')  # 尝试使用zip打开压缩包
+        zip_file = zipfile.ZipFile(os.path.join(local_tmp_folder, file_name), 'r')  # 尝试使用zip打开压缩包
     except:
         try:
-            zip_file = rarfile.RarFile(os.path.join(subtitles_save_folder, 'tmp', file_name), 'r')  # 不成功，则尝试使用rar打开压缩包
+            zip_file = rarfile.RarFile(os.path.join(local_tmp_folder, file_name), 'r')  # 不成功，则尝试使用rar打开压缩包
         except Exception as err:
             print_and_log('Error: Unable to open compress file!!!')
             print_and_log(err)
@@ -440,26 +413,22 @@ def download_subtitles_file(url, language, imdb, tv_name, subtitle_id, season):
                 print_and_log('Error: File name not contain season and episode:  ' + srt_file)
                 continue
             else:
-                if season is None:
-                    print_and_log('Error: Title and file name not contain season:  ' + srt_file)
+                result = ()
+                try:
+                    cursor.execute(select_last_sql, (imdb,))
+                except Exception as err:
+                    print_and_log(err)
+                    print_and_log('Error: Unable get table last season from DB!')
+                    continue
+                result = cursor.fetchall()
+                if len(result) != 2:
+                    continue
+                elif result[0][0][:3] != result[1][0][:3]:  # 最后两条记录的season不相同
                     continue
                 else:
-                    result = ()
-                    try:
-                        cursor.execute(select_last_sql, (imdb,))
-                    except Exception as err:
-                        print_and_log(err)
-                        print_and_log('Error: Unable get table last season from DB!')
-                        continue
-                    result = cursor.fetchall()
-                    if len(result) != 2:
-                        continue
-                    elif result[0][0][:3] != result[1][0][:3]:  # 最后两条记录的season不相同
-                        continue
-                    else:
-                        season_and_episode = result[0][0][:3] + episode
+                    season_and_episode = result[0][0][:3] + episode
         elif season_and_episode is False:
-            print_and_log('Season or episode Error!!!')
+            print_and_log('Season or episode Error!!!  ' + srt_file)
             continue
         file_path = os.path.join(subtitles_save_folder, imdb, season_and_episode)
         if not os.path.exists(file_path):         # 创建季和集文件夹，存放指定季和集的字幕文件
@@ -504,7 +473,7 @@ def download_subtitles_file(url, language, imdb, tv_name, subtitle_id, season):
                 continue
             data = data_tmp
             srt_file = srt_file[:srt_file.rfind('.')] + '.srt'
-            srt_file_new = file_path + '/' + subtitle_id + '-' + srt_file  # 新文件绝对路径
+            srt_file_new = os.path.join(file_path, subtitle_id + '-' + srt_file)  # 新文件绝对路径
         elif file_format == 'ass':  # ass字幕文件
             data_tmp = converter.convertASS(data)
             if type(data_tmp) == str:
@@ -513,7 +482,7 @@ def download_subtitles_file(url, language, imdb, tv_name, subtitle_id, season):
                 continue
             data = data_tmp
             srt_file = srt_file[:srt_file.rfind('.')] + '.ass'
-            srt_file_new = file_path + '/' + subtitle_id + '-' + srt_file + '.srt'  # 新文件绝对路径
+            srt_file_new = os.path.join(file_path, subtitle_id + '-' + srt_file + '.srt')  # 新文件绝对路径
         elif file_format == 'smi':  # smi字幕文件
             data_tmp = converter.convertSMI(data)
             if type(data_tmp) == str:
@@ -522,7 +491,7 @@ def download_subtitles_file(url, language, imdb, tv_name, subtitle_id, season):
                 continue
             data = data_tmp
             srt_file = srt_file[:srt_file.rfind('.')] + '.smi'
-            srt_file_new = file_path + '/' + subtitle_id + '-' + srt_file + '.srt'  # 新文件绝对路径
+            srt_file_new = os.path.join(file_path, subtitle_id + '-' + srt_file + '.srt')  # 新文件绝对路径
         elif file_format == 'sub':  # sub字幕文件
             data_tmp = converter.convertSUB(data)
             if type(data_tmp) == str:
@@ -531,7 +500,7 @@ def download_subtitles_file(url, language, imdb, tv_name, subtitle_id, season):
                 continue
             data = data_tmp
             srt_file = srt_file[:srt_file.rfind('.')] + '.sub'
-            srt_file_new = file_path + '/' + subtitle_id + '-' + srt_file + '.srt'  # 新文件绝对路径
+            srt_file_new = os.path.join(file_path, subtitle_id + '-' + srt_file + '.srt')  # 新文件绝对路径
         elif file_format == 'other':             # 其它字幕文件
             data_tmp = converter.check(data)
             if type(data_tmp) == str:
@@ -540,7 +509,7 @@ def download_subtitles_file(url, language, imdb, tv_name, subtitle_id, season):
                 continue
             data = data_tmp
             # srt_file = srt_file[:srt_file.rfind('.')] + '.sub'
-            srt_file_new = file_path + '/' + subtitle_id + '-' + srt_file + '.srt'  # 新文件绝对路径
+            srt_file_new = os.path.join(file_path, subtitle_id + '-' + srt_file + '.srt')  # 新文件绝对路径
         else:
             continue
         md5_this = None
@@ -566,7 +535,7 @@ def download_subtitles_file(url, language, imdb, tv_name, subtitle_id, season):
             continue
         is_exist = False    # 字幕文件是否已存在，默认为否
         for each_result in result:     # 分别比较已存在的文件与现在下载的文件的MD5值
-            path = each_result[0]    # 去掉域名，变成本机文件地址
+            path = each_result[0]
             try:
                 with open(path, 'rb') as f:           # 读取文件，获取其MD5值
                     md5_result = hashlib.md5(f.read()).hexdigest()
@@ -587,10 +556,10 @@ def download_subtitles_file(url, language, imdb, tv_name, subtitle_id, season):
         result = ()
         try:
             if type(data) == list:
-                cursor.execute(select_all_sql, (imdb, language,
+                cursor.execute(select_all_sql, (imdb, language, season_and_episode,
                                                 srt_file_new.replace('.sub.srt', '') + '-23.976fps.sub.srt'))
             else:
-                cursor.execute(select_all_sql, (imdb, language, srt_file_new))  # 查询数据库是否已有该文件名称的电影记录
+                cursor.execute(select_all_sql, (imdb, language, season_and_episode, srt_file_new))  # 查询数据库是否已有该文件名称的电影记录
             result = cursor.fetchall()
         except Exception as err:
             print_and_log('Error: Unable to get data from DB, Unable to check this subtitle data existed or not on DB!')
@@ -608,14 +577,14 @@ def download_subtitles_file(url, language, imdb, tv_name, subtitle_id, season):
                 srt_file_new = srt_file_new.replace('.srt', '') + '-' + random_code + '.srt'  # 文件名增加随机码，以避开相同文件名
         try:
             if type(data) == list:
-                cursor.execute(insert_sql, (imdb, tv_name, language, language_short,
+                cursor.execute(insert_sql, (imdb, season_and_episode, tv_name, language, language_short,
                                             srt_file_new.replace('.sub.srt', '') + '-23.976fps.sub.srt'))  # 插入数据库
-                cursor.execute(insert_sql, (imdb, tv_name, language, language_short,
+                cursor.execute(insert_sql, (imdb, season_and_episode, tv_name, language, language_short,
                                             srt_file_new.replace('.sub.srt', '') + '-24fps.sub.srt'))  # 插入数据库
-                cursor.execute(insert_sql, (imdb, tv_name, language, language_short,
+                cursor.execute(insert_sql, (imdb, season_and_episode, tv_name, language, language_short,
                                             srt_file_new.replace('.sub.srt', '') + '-25fps.sub.srt'))  # 插入数据库
             else:
-                cursor.execute(insert_sql, (imdb, tv_name, language, language_short, srt_file_new))  # 插入数据库
+                cursor.execute(insert_sql, (imdb, season_and_episode, tv_name, language, language_short, srt_file_new))  # 插入数据库
             conn.commit()
         except Exception as err:
             print_and_log('Error: Unable insert data to DB!!!')
@@ -641,18 +610,30 @@ def download_subtitles_file(url, language, imdb, tv_name, subtitle_id, season):
     try:
         zip_file.close()     # 关闭压缩文件
     except Exception as err:
-        print_and_log('Error: Unable to close compress file!!!  '+os.path.join(subtitles_save_folder, 'tmp', file_name))
-        print_and_log(err)
-    try:
-        for each_compress_file in os.listdir(os.path.join(subtitles_save_folder, 'tmp')):
-            os.remove(os.path.join(subtitles_save_folder, 'tmp', each_compress_file))        # 删除tmp目录下压缩包和字幕文件，节约空间
-    except Exception as err:
-        print_and_log('Error: Unable to delete compress file and subtitle file!!!')
+        print_and_log('Error: Unable to close compress file!!!  '+os.path.join(local_tmp_folder, file_name))
         print_and_log(err)
 
 
 def main():
-    os.makedirs(os.path.join(subtitles_save_folder, 'tmp'), exist_ok=True)
+    global playwright, browser, page
+    count = 0
+    while count < 3:
+        try:
+            page.goto('https://subscene.com')
+        except Exception as err:
+            print_and_log(err)
+            print_and_log(f'Error: Unable open page https://subscene.com, retry again {count}')
+            time.sleep(15)
+            count += 1
+        else:
+            break
+    if count >= 3:
+        print_and_log(f'Error: Unable open page https://subscene.com, exit!')
+        return None
+
+    last_restart_time = time.time()
+    last_time = time.time()
+    os.makedirs(local_tmp_folder, exist_ok=True)
     csv_file = open(csv_file_path, 'r')    # 读取csv文件
     imdb_str = csv_file.read()
     csv_file.close()
@@ -663,7 +644,7 @@ def main():
         print_and_log('IMDB schedule is ' + str(int((imdb_list_index + 1) / len(imdb_list) * 100)) + '%')
         imdb_url = 'https://v2.sg.media-imdb.com/suggestion/t/' + imdb_list[imdb_list_index] + '.json'
         tv_name_ajax = None
-        res = get_response(imdb_url, my_header=ajax_header(), quickly=True)
+        res = get_response(imdb_url, my_header=ajax_header())
         if res is None or res.status_code != 200:
             if res is not None:
                 print_and_log('Status Code is ' + str(res.status_code))
@@ -677,7 +658,7 @@ def main():
                 print_and_log(err)
                 tv_name_ajax = None
         imdb_url = 'https://www.imdb.com/title/' + imdb_list[imdb_list_index] + '/'
-        res = get_response(imdb_url, my_header=stander_header(), quickly=True)  # 搜索IMDB网站获取imdb对应的电视剧名称
+        res = get_response(imdb_url, my_header=stander_header())  # 搜索IMDB网站获取imdb对应的电视剧名称
         if res is None or res.status_code != 200:
             if res is not None:
                 print_and_log('Status Code is ' + str(res.status_code))
@@ -695,8 +676,12 @@ def main():
             imdb_list_index += 1
             continue
         h1 = h1[0]
-        tv_name = h1.getprevious().xpath('.//text()')  # 获取真正的电视剧名称，非剧集名称
-        imdb_true = h1.getprevious().xpath('./a/@href')  # 获取真正的电视剧的imdb
+        if h1.getprevious() is None:
+            tv_name = None
+            imdb_true = None
+        else:
+            tv_name = h1.getprevious().xpath('.//text()')    # 获取真正的电视剧名称，非剧集名称
+            imdb_true = h1.getprevious().xpath('./a/@href')  # 获取真正的电视剧的imdb
         if tv_name is None or len(tv_name) == 0 or imdb_true is None or len(imdb_true) == 0:
             if tv_name_ajax is not None:
                 tv_name = [tv_name_ajax]
@@ -718,45 +703,49 @@ def main():
             imdb_list_index += 1
             continue
         tv_name = ''.join(tv_name).replace('\n', '').replace('\r', '').replace('\t', '').replace('\xa0', '').strip()      # 获取imdb对应的电视剧名称
-        post_data = {'query': tv_name, 'l': ''}
-        header_subscene = {
-            'referer': 'https://subscene.com/subtitles/searchbytitle',
-            'origin': 'https://subscene.com',
-            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9',
-            'accept-language': 'en',
-            'accept-encoding': 'gzip, deflate',
-            'ec-fetch-dest': 'document',
-            'sec-fetch-mode': 'navigate',
-            'sec-fetch-site': 'same-origin',
-            'sec-fetch-user': '?1',
-            'upgrade-insecure-requests': '1',
-            'user-agent': UA_TMPL % random.choice(VERSION_LIST)
-        }
-        h2 = None
-        uls = None
-        count = 0
-        while count < 8:
-            res = post_response('https://subscene.com/subtitles/searchbytitle', header_subscene, post_data)        # 使用subscene网站进行搜索
-            if res is None or res.status_code != 200:
-                if res is not None:
-                    print_and_log('Status Code is ' + str(res.status_code))
-                print_and_log(str(count)+'  Error: Unable to search: << '+tv_name+' >> in subscene.com  '+imdb_list[imdb_list_index])
-                session.cookies.clear()
-                # time.sleep(30)
-                count += 1
-                continue
-            html = etree.HTML(res.text)
-            h2 = html.xpath('//div[@class="search-result"]/h2/text()')  # 获取标题(电视剧名称)
-            uls = html.xpath('//div[@class="search-result"]/ul')  # 获取ul标签
-            if h2 is None or uls is None or len(h2) == 0 or len(uls) == 0 or len(h2) != len(uls):
-                print_and_log(str(count)+'  Error: Unable to get all TV subtitles title!!!  '+imdb_list[imdb_list_index])
-                session.cookies.clear()
-                # time.sleep(5)
-                count += 1
-                continue
-            else:
-                break
-        if count >= 8 or h2 is None or uls is None:
+
+        if time.time() - last_time <= 9.0:
+            time.sleep(int(time.time() - last_time) + 1)
+            last_time = time.time()
+        source_code = page.content()
+        if '<input type="text" name="query" id="query"' not in source_code or \
+                '<button type="submit">Subtitle Search</button>' not in source_code:
+            count = 0
+            while count < 3:
+                try:
+                    page.goto('https://subscene.com')
+                except Exception as err:
+                    print_and_log(err)
+                    print_and_log(f'Error: Unable open page https://subscene.com, retry again {count}')
+                    time.sleep(15)
+                    count += 1
+                else:
+                    source_code = page.content()
+                    if '<input type="text" name="query" id="query"' in source_code and \
+                            '<button type="submit">Subtitle Search</button>' in source_code:
+                        break
+                    else:
+                        print_and_log(f'Error: Unable found input text and search button in page, retry again {count}')
+                        time.sleep(15)
+                        count += 1
+            if count >= 3:
+                print_and_log(f'Error: Unable open page https://subscene.com, exit!')
+                return None
+        try:
+            page.fill("//input[@id='query']", tv_name)
+            page.click("text=Subtitle Search")
+        except Exception as err:
+            traceback.print_exc()
+            print_and_log(err)
+            print_and_log(f'Error: Unable to search {tv_name}!')
+            imdb_list_index += 1
+            continue
+        html = etree.HTML(page.content())
+        h2 = html.xpath('//div[@class="search-result"]/h2/text()')  # 获取标题(电视剧名称)
+        uls = html.xpath('//div[@class="search-result"]/ul')  # 获取ul标签
+        if h2 is None or uls is None or len(h2) == 0 or len(uls) == 0 or len(h2) != len(uls):
+            print_and_log(f'Error: {page.title()}')
+            print_and_log(f'Error: No Results Found!!!  {imdb_list[imdb_list_index]}')
             imdb_list_index += 1
             continue
         lis = []
@@ -793,15 +782,50 @@ def main():
             if 'TV-Series' not in h2 and tv_url in url_set:      # 检测该url是否已被访问过
                 li_index += 1
                 continue
-            res = get_response(tv_url, my_header=header_subscene, quickly=True)  # 打开该电视剧字幕详情页面
-            if res is None or res.status_code != 200:
-                if res is not None:
-                    print_and_log('Status Code is ' + str(res.status_code))
-                print_and_log('Unable to open page ' + tv_url + '  ' + imdb_list[imdb_list_index])
+
+            if time.time() - last_restart_time > 3 * 60 * 60:    # 每3小时重启playwright和浏览器防止内存溢出
+                browser.close()
+                playwright.stop()
+                playwright = None
+                browser = None
+                page = None
+                time.sleep(1)
+                gc.collect()
+                playwright = sync_playwright().start()
+                browser = playwright.firefox.launch(downloads_path=local_tmp_folder)
+                page = browser.new_page()
+                print_and_log('Browser restart!')
+                last_restart_time = time.time()
+
+            count = 0
+            while count < 3:
+                time.sleep(2)
+                try:
+                    page.goto(tv_url)
+                except Exception as err:
+                    print_and_log(err)
+                    print_and_log(f'Error: Unable open page {tv_url}, retry again {count}')
+                    time.sleep(10)
+                    count += 1
+                else:
+                    if 'To many requests' in page.title():
+                        print_and_log('Warning: To many requests! 812')
+                        time.sleep(15)
+                        count += 1
+                    else:
+                        break
+            if count >= 3:
+                print_and_log(f'Error: Unable open page {tv_url}, {imdb_list[imdb_list_index]}, ignore!')
                 li_index += 1
                 continue
             url_set.add(tv_url)  # 设置该url已被访问过
-            html = etree.HTML(res.text)
+            html = etree.HTML(page.content())
+            a_s = html.xpath('//div[@class="content clearfix"]//tr/td[@class="a1"]/a')  # 获取页面上的字幕列表
+            if a_s is None or len(a_s) == 0:
+                print_and_log(f'Error: {page.title()}')
+                print_and_log(f'Error: No subtitles list in page {tv_url}')
+                li_index += 1
+                continue
             imdb = html.xpath('//h2/a[@class="imdb"]/@href')
             if imdb is None or len(imdb) == 0:
                 # print_and_log('Unable to get imdb, jump this!!!')
@@ -829,7 +853,7 @@ def main():
                 continue  # 不是指定imdb的电视剧字幕，跳过
             else:
                 is_not_found = False  # 是指定imdb的电视剧字幕
-            a_s = html.xpath('//div[@class="content clearfix"]//tr/td[@class="a1"]/a')    # 获取页面上的字幕列表
+
             a_index = 0
             while a_index < len(a_s):      # 遍历字幕列表每一个字幕
                 language = a_s[a_index].xpath('./span[1]/text()')     # 获取字幕语言
@@ -851,33 +875,37 @@ def main():
                 file_page_url = 'https://subscene.com' + file_page_url[0].replace('\r', '').replace('\n', '').replace('\t', '').replace('\xa0', '').strip()
                 subtitle_id = file_page_url.split('/')[-1]        # 获取该字幕的id
                 count = 0
-                download_url = None
-                while count < 8:
-                    res = get_response(file_page_url, my_header=stander_header(), quickly=True)  # 打开字幕下载详情页面
-                    if res is None or res.status_code != 200:
-                        if res is not None:
-                            print_and_log('Status Code is ' + str(res.status_code))
-                        print_and_log(str(count) + '  Unable to open subtitles download page!  ' + file_page_url + '  ' + imdb_list[imdb_list_index])
-                        session.cookies.clear()
+                while count < 3:
+                    time.sleep(2)
+                    try:
+                        page.goto(file_page_url)
+                    except Exception as err:
+                        print_and_log(err)
+                        print_and_log(f'Error: Unable open page {file_page_url}, retry again {count}')
                         count += 1
-                        # time.sleep(5)
-                        continue
-                    html = etree.HTML(res.text)
-                    download_url = html.xpath('//a[@id="downloadButton"]/@href')  # 获取字幕下载地址
-                    if download_url is None or len(download_url) == 0:
-                        print_and_log(str(count) + '  Unable to get subtitle download url!!!  ' + file_page_url)
-                        count += 1
-                        # time.sleep(5)
+                        time.sleep(10)
                         continue
                     else:
-                        break
-                if count >= 8 or download_url is None or len(download_url) == 0:
+                        if 'To many requests' in page.title():
+                            print_and_log('Warning: To many requests! 890')
+                            time.sleep(15)
+                            count += 1
+                        else:
+                            break
+                if count >= 3:
+                    a_index += 1
+                    continue
+                html = etree.HTML(page.content())
+                download_url = html.xpath('//a[@id="downloadButton"]/@href')  # 获取字幕下载地址
+                if download_url is None or len(download_url) == 0:
+                    print_and_log(f'Error: Unable get subtitles download url from {file_page_url}, {imdb_list[imdb_list_index]}, <<{tv_name}>>')
                     a_index += 1
                     continue
                 download_url = 'https://subscene.com' + download_url[0]
                 if not os.path.exists(os.path.join(subtitles_save_folder, imdb_list[imdb_list_index])):     # 创建该电视剧的文件夹
                     os.mkdir(os.path.join(subtitles_save_folder, imdb_list[imdb_list_index]))
-                download_subtitles_file(download_url, language, imdb_list[imdb_list_index], tv_name, subtitle_id, season)    # 下载字幕文件zip包，并进行比较、转码和入库
+                download_subtitles_file(download_url, language, imdb_list[imdb_list_index], tv_name, subtitle_id)    # 下载字幕文件zip包，并进行比较、转码和入库
+                os.system('rm -f ' + os.path.join(local_tmp_folder, '*'))  # 删除tmp目录下压缩包，节约空间
                 a_index += 1
             li_index += 1
         if is_not_found:
@@ -901,3 +929,5 @@ if __name__ == '__main__':
     else:
         cursor.close()
         conn.close()
+    browser.close()
+    playwright.stop()

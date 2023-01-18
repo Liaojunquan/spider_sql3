@@ -16,6 +16,7 @@ import platform
 import sys
 import json
 import converter
+import traceback
 
 conn = sqlite3.connect('info.db')
 cursor = conn.cursor()
@@ -99,7 +100,7 @@ language_dict = {                                          # 语言语种，不�
     # "latvian": 'lv',    # 拉脱维亚语
     # "maltese": 'mt',    # 马耳他语
     # "marathi": 'mr',    # 马拉地语
-    # "mongolian (cyrillic)": 'mn',    # 蒙古语（西里尔文）
+    # "mongolian (cyrillic)": 'mn', "mongolian": 'mn'    # 蒙古语（西里尔文）
     # "nepali (india)": 'ne', 'nepali': 'ne',   # 尼泊尔语
     # "oriya": 'or',      # 奥里亚
     # "punjabi": 'pa',    # 旁遮普语
@@ -118,7 +119,8 @@ language_dict = {                                          # 语言语种，不�
     # 'yoruba': 'yo',     # 约鲁巴语
     # 'tagalog': 'tl',    # 他加禄语
     # 'occitan': 'oc',
-    # 'pashto': 'ps'      # 普什图语
+    # 'pashto': 'ps',      # 普什图语
+    # 'manipuri': 'mp'    # 曼尼普尔语
 }
 
 # ------------------------------以下内容非必要勿进行修改---------------------------------------------
@@ -142,6 +144,7 @@ select_all_sql = "select moviename from subtitle where imdb_id=? and language=? 
 session = requests.session()
 url_set = set()
 imdb_set = set()
+not_found_count = 0
 
 
 def print_and_log(msg):
@@ -193,8 +196,11 @@ def download_header():
     }
 
 
-def get_response(url, my_header):
-    time.sleep(6)
+def get_response(url, my_header, quickly=False):
+    if quickly:
+        time.sleep(1)
+    else:
+        time.sleep(6)
     res = None
     count = 0
     while count < 3:    # 3次重连机会
@@ -318,7 +324,8 @@ def delete_special_char(name):
         .replace('%', '').replace('@', '').replace('!', '').replace('$', '').replace('^', '').replace('*', '') \
         .replace('~', '').replace('<', '').replace('>', '').replace('|', '').replace('"', '').replace('=', '') \
         .replace(';', '').replace(':', '').replace(' ', '-').replace('._.', '-').replace('.-.', '-') \
-        .replace('-.-', '-').replace('--', '-').replace('..', '.').replace('__', '-')
+        .replace('-.-', '-').replace('--', '-').replace('..', '.').replace('__', '-').replace('_-_', '-')\
+        .strip('.').strip('_').strip('-').strip()
 
 
 def save_convert_error_file(data, file_name):
@@ -339,7 +346,7 @@ def download_subtitles_file(url, language, imdb, mv_name, subtitle_id):
     count = 0
     res = None
     while count < 8:
-        res = get_response(url, my_header=download_header())  # 下载字幕文件压缩包
+        res = get_response(url, my_header=download_header(), quickly=True)  # 下载字幕文件压缩包
         if res is None or res.status_code != 200:
             count += 1
             if res is not None:
@@ -354,17 +361,17 @@ def download_subtitles_file(url, language, imdb, mv_name, subtitle_id):
     if res is None or count >= 8:
         return None
     try:
-        with open(subtitles_save_folder+'/tmp/'+file_name, 'wb') as f:       # 字幕zip包保存到E:/data/movies/tmp目录下
+        with open(os.path.join(subtitles_save_folder, 'tmp', file_name), 'wb') as f:       # 字幕zip包保存到/data/movies/tmp目录下
             f.write(res.content)
     except Exception as err:
         print_and_log('Error: Unable save compress file to disk!!!')
         print_and_log(err)
         return None
     try:
-        zip_file = zipfile.ZipFile(subtitles_save_folder + '/tmp/' + file_name, 'r')  # 尝试使用zip打开压缩包
+        zip_file = zipfile.ZipFile(os.path.join(subtitles_save_folder, 'tmp', file_name), 'r')  # 尝试使用zip打开压缩包
     except:
         try:
-            zip_file = rarfile.RarFile(subtitles_save_folder + '/tmp/' + file_name, 'r')  # 不成功，则尝试使用rar打开压缩包
+            zip_file = rarfile.RarFile(os.path.join(subtitles_save_folder, 'tmp', file_name), 'r')  # 不成功，则尝试使用rar打开压缩包
         except Exception as err:
             print_and_log('Error: Unable to open compress file!!!')
             print_and_log(err)
@@ -385,24 +392,22 @@ def download_subtitles_file(url, language, imdb, mv_name, subtitle_id):
             pass
         is_error_file = False
         if srt_file.endswith('.jpg') or srt_file.endswith('.rar') or srt_file.endswith('.nfo') or \
-                srt_file.endswith('.idx') or srt_file.endswith('.torrent'):           # 跳过非字幕文件
+                srt_file.endswith('.idx') or srt_file.endswith('.torrent') or srt_file.endswith('.zip') or \
+                srt_file.endswith('.doc') or srt_file.endswith('.db'):     # 跳过非字幕文件
             continue
         if '.' in srt_file and not srt_file.endswith('.srt') and not srt_file.endswith('.ass') and \
                 not srt_file.endswith('.smi') and not srt_file.endswith('.sub') and not srt_file.endswith('.ssa') and \
-                not srt_file.endswith('.txt'):      # 不是指定后缀的文件，则跳过
+                not srt_file.endswith('.txt') and not srt_file.endswith('-srt') and not srt_file.endswith('-lol'):      # 不是指定后缀的文件，则跳过
             print_and_log('Not a subtitle file:  ' + srt_file)
             is_error_file = True
         language_short = language_dict.get(language)     # 获取语言缩写
-        file_path = subtitles_save_folder + '/' + imdb + '/' + language.replace(' ', '_').replace('/', '_')    # 字幕文件最终存放路径
-        if language_short is None:
-            continue
-#            file_path = subtitles_save_folder + '/' + imdb + '/' + language.replace(' ', '_')
-#            if not os.path.exists(file_path):  # 创建语言文件夹，存放指定语言的字幕文件
-#                os.mkdir(file_path)
-        else:
-            file_path = subtitles_save_folder + '/' + imdb + '/' + language_short
+        file_path = os.path.join(subtitles_save_folder, imdb, language.replace(' ', '_').replace('/', '_'))   # 字幕文件最终存放路径
+        if language_short is not None:
+            file_path = os.path.join(subtitles_save_folder, imdb, language_short)   # 字幕文件最终存放路径
             if not os.path.exists(file_path):  # 创建语言文件夹，存放指定语言的字幕文件
                 os.mkdir(file_path)
+        else:
+            continue
         try:
             data = zip_file.read(srt_file_name)  # 根据文件名从zip包读取指定文件
         except Exception as err:
@@ -579,11 +584,11 @@ def download_subtitles_file(url, language, imdb, mv_name, subtitle_id):
     try:
         zip_file.close()     # 关闭压缩文件
     except Exception as err:
-        print_and_log('Error: Unable to close compress file!!!  '+subtitles_save_folder+'/tmp/'+file_name)
+        print_and_log('Error: Unable to close compress file!!!  '+os.path.join(subtitles_save_folder, 'tmp', file_name))
         print_and_log(err)
     try:
-        for each_compress_file in os.listdir(subtitles_save_folder+'/tmp'):
-            os.remove(subtitles_save_folder+'/tmp/'+each_compress_file)        # 删除tmp目录下压缩包和字幕文件，节约空间
+        for each_compress_file in os.listdir(os.path.join(subtitles_save_folder, 'tmp')):
+            os.remove(os.path.join(subtitles_save_folder, 'tmp', each_compress_file))        # 删除tmp目录下压缩包和字幕文件，节约空间
     except Exception as err:
         print_and_log('Error: Unable to delete compress file and subtitle file!!!')
         print_and_log(err)
@@ -655,7 +660,7 @@ def search_movies(mv_name, imdb_list, imdb_list_index):
         if mv_url in url_set:
             li_index += 1
             continue
-        res = get_response(mv_url, my_header=header_subscene)  # 打开该电影字幕详情页面
+        res = get_response(mv_url, my_header=header_subscene, quickly=True)  # 打开该电影字幕详情页面
         if res is None or res.status_code != 200:
             if res is not None:
                 print_and_log('Status Code is ' + str(res.status_code))
@@ -707,7 +712,11 @@ def search_movies(mv_name, imdb_list, imdb_list_index):
                     if each_language.strip() != 'english':
                         language = each_language.strip()
                         break
-            if ' code' in language or language_dict.get(language) is None:
+            if ' code' in language:
+                a_index += 1
+                continue
+            elif language_dict.get(language) is None:
+                print_and_log('Error: Unable to get language short: ' + language)
                 a_index += 1
                 continue
             file_page_url = 'https://subscene.com' + file_page_url[0].replace('\r', '').replace('\n', '').replace('\t', '').replace('\xa0', '').strip()
@@ -715,7 +724,7 @@ def search_movies(mv_name, imdb_list, imdb_list_index):
             count = 0
             download_url = None
             while count < 8:
-                res = get_response(file_page_url, my_header=stander_header())  # 打开字幕下载详情页面
+                res = get_response(file_page_url, my_header=stander_header(), quickly=True)  # 打开字幕下载详情页面
                 if res is None or res.status_code != 200:
                     if res is not None:
                         print_and_log('Status Code is ' + str(res.status_code))
@@ -737,8 +746,8 @@ def search_movies(mv_name, imdb_list, imdb_list_index):
                 a_index += 1
                 continue
             download_url = 'https://subscene.com' + download_url[0]
-            if not os.path.exists(subtitles_save_folder + '/' + imdb_list[imdb_list_index]):  # 创建该电影的文件夹
-                os.mkdir(subtitles_save_folder + '/' + imdb_list[imdb_list_index])
+            if not os.path.exists(os.path.join(subtitles_save_folder, imdb_list[imdb_list_index])):  # 创建该电影的文件夹
+                os.mkdir(os.path.join(subtitles_save_folder, imdb_list[imdb_list_index]))
             download_subtitles_file(download_url, language, imdb_list[imdb_list_index], mv_name, subtitle_id)  # 下载字幕文件zip包，并进行比较、转码和入库
             a_index += 1
         li_index += 1
@@ -746,27 +755,16 @@ def search_movies(mv_name, imdb_list, imdb_list_index):
 
 
 def main():
-    global subtitles_save_folder
-    subtitles_save_folder = subtitles_save_folder.replace('\\', '/')
-    if len(subtitles_save_folder.split('/')) < 2:
-        print_and_log('subtitles_save_folder Error!!!')
-        return None
-    path_tmp = ''
-    for i in range(len(subtitles_save_folder.split('/'))):
-        if i == 0:
-            path_tmp += subtitles_save_folder.split('/')[i]
-        else:
-            path_tmp += ('/'+subtitles_save_folder.split('/')[i])
-            if not os.path.exists(path_tmp):
-                os.mkdir(path_tmp)                          # 创建subtitles_save_folder各文件夹
-    if not os.path.exists(subtitles_save_folder+'/tmp'):          # 创建存放压缩包的临时文件夹tmp
-        os.mkdir(subtitles_save_folder+'/tmp')
+    global not_found_count
+    os.makedirs(os.path.join(subtitles_save_folder, 'tmp'), exist_ok=True)
     csv_file = open(csv_file_path, 'r')    # 读取csv文件
     imdb_str = csv_file.read()
     csv_file.close()
     imdb_list = imdb_str.split('\n')    # 获取csv文件中的所有电视剧imdb
     imdb_list_index = 0
     while 1:
+        if not_found_count > 80:  # 连续80个imdb找不到结果，则说明可以结束了
+            return None
         while 1:
             imdb_list_index = random.randint(0, len(imdb_list))   # 随机取一个imdb
             if imdb_list_index not in imdb_set and 0 <= imdb_list_index < len(imdb_list):
@@ -775,7 +773,7 @@ def main():
         print_and_log('IMDB now is '+imdb_list[imdb_list_index])
         # print_and_log('IMDB schedule is ' + str(int((imdb_list_index + 1) / len(imdb_list) * 100)) + '%')
         imdb_url = 'https://www.imdb.com/title/' + imdb_list[imdb_list_index] + '/'
-        res = get_response(imdb_url, my_header=stander_header())     # 搜索IMDB网站获取imdb对应的电影名称
+        res = get_response(imdb_url, my_header=stander_header(), quickly=True)     # 搜索IMDB网站获取imdb对应的电影名称
         if res is None or res.status_code != 200:
             if res is not None:
                 print_and_log('Status Code is ' + str(res.status_code))
@@ -793,7 +791,7 @@ def main():
         if not is_found:
             imdb_url = 'https://v2.sg.media-imdb.com/suggestion/t/' + imdb_list[imdb_list_index] + '.json'
             mv_name_ajax = None
-            res = get_response(imdb_url, my_header=ajax_header())
+            res = get_response(imdb_url, my_header=ajax_header(), quickly=True)
             if res is None or res.status_code != 200:
                 if res is not None:
                     print_and_log('Status Code is ' + str(res.status_code))
@@ -811,13 +809,22 @@ def main():
                 is_found = search_movies(mv_name_ajax, imdb_list, imdb_list_index)
             if not is_found:
                 print_and_log('Error: << ' + mv_name + ' >>  ' + imdb_list[imdb_list_index] + ' not Found !!!')
+                not_found_count += 1
                 continue
         imdb_set.add(imdb_list_index)
-        # imdb_list_index += 1
+        not_found_count = 0
     print_and_log('-----------------Finish All!--------------------')
 
 
 if __name__ == '__main__':
-    main()
-    cursor.close()
-    conn.close()
+    try:
+        main()
+    except Exception as err:
+        print_and_log('Error in main func!!!')
+        print_and_log(err)
+        traceback.print_exc()
+        cursor.close()
+        conn.close()
+    else:
+        cursor.close()
+        conn.close()

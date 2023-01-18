@@ -3,7 +3,6 @@ import re
 import copy
 
 # -----------------------------------ass --->  srt------------------------------------
-_REG_CMD = re.compile(r'{.*?}')
 TEMPLATE = '%02d:%02d:%02d,%03d --> %02d:%02d:%02d,%03d\r\n'
 TEMPLATE_WITH_INDEX = '%d\r\n%02d:%02d:%02d,%03d --> %02d:%02d:%02d,%03d\r\n'
 
@@ -16,16 +15,27 @@ def sec_to_time(sec):
     return hours, minutes, seconds, milli
 
 
-def check_dialogue(dialogue):
-    if ('.com' in dialogue or '.org' in dialogue or '.tv' in dialogue or '©' in dialogue or
-            len(re.findall(' by ', dialogue, re.IGNORECASE)) > 0 or 'www' in dialogue or 'http' in dialogue or
-            '@' in dialogue or 'subtitle' in dialogue or len(re.findall('translation', dialogue, re.IGNORECASE)) > 0 or
-            len(re.findall('fackbook', dialogue, re.IGNORECASE)) > 0 or
-            len(re.findall('NETFLIX', dialogue, re.IGNORECASE)) > 0 or
-            len(re.findall('translate', dialogue, re.IGNORECASE)) > 0):
+def check_dialogue(dialogue_raw):
+    dialogue = dialogue_raw.replace('\r', '').replace('\n', '')
+    if ('.com' in dialogue or '.org' in dialogue or '.tv' in dialogue or '©' in dialogue or '.net' in dialogue or
+            'www' in dialogue or 'http' in dialogue or '@' in dialogue or 'subtitle' in dialogue or
+            len(re.findall('^by| by |translation|fackbook|NETFLIX|translate', dialogue, re.IGNORECASE)) > 0 or
+            'oOo' in dialogue or ' BONUS ' in dialogue or '. N E T' in dialogue):
         return True
     else:
         return False
+
+
+def delete_all_tags(raw_text):
+    text = copy.deepcopy(raw_text)
+    tags = re.findall('<.*?>', text.replace('<<<', '').replace('>>>', '').replace('<<', '').replace('>>', ''))        # 找出所有的标签并去除
+    for tag in tags:
+        text = text.replace(tag, '').strip()
+    commands = re.findall('{.*?}', text)          # 找出所有的{}内的内容
+    for command in commands:
+        if len(re.findall(r'\\', command)) > 2:   # {}内是否是命令
+            text = text.replace(command, '').strip()     # 去掉命令
+    return text
 
 
 class SimpleTime(object):
@@ -93,32 +103,9 @@ def convertASS(ass_data, no_effect=False, only_first_line=False):
     if len(lines) == 0:
         return 'Ass data is null!'
     index = 0
-#    while index < len(lines):          # Locate the Events tag.
-#        line = _preprocess_line(lines[index])
-#        if not line.startswith('[Events]'):
-#            if index == len(lines) - 1:
-#                return 'Unable to find tag: [Events]'
-#            index += 1
-#        else:
-#            index += 1
-#            break
     formater = AssDialogueFormater("Format: Marked, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\r")
-#    while index < len(lines):
-#        line = _preprocess_line(lines[index])
-#        line1 = _preprocess_line(lines[index+1])
-#        if line.startswith('Format:') and line1.startswith('Dialogue:'):
-#            formater = AssDialogueFormater(line)
-#            if formater is None:
-#                return "Unable to find format line in this file!"
-#            else:
-#                index += 1
-#                break
-#        else:
-#            if index == len(lines) - 1:
-#                return 'Unable to find format line!'
-#            index += 1
-    # Iterate and convert all Dialogue lines:
     srt_dialogues = []
+    time_list = []
     while index < len(lines):
         line = _preprocess_line(lines[index])
         if not line.startswith('Dialogue:'):
@@ -129,8 +116,8 @@ def convertASS(ass_data, no_effect=False, only_first_line=False):
         except:
             index += 1
             continue
-        if dialogue['end'] - dialogue['start'] < 0.05 or dialogue['end'] - dialogue['start'] > 10.0:
-            index += 1          # 跳过持续时间小于0.05s或大于10s的对白
+        if dialogue['end'] - dialogue['start'] < 0.015 or dialogue['end'] - dialogue['start'] > 60:
+            index += 1          # 跳过持续时间小于0.015s或大于60s的对白
             continue
         if no_effect:
             if dialogue.get('effect', ''):
@@ -139,31 +126,58 @@ def convertASS(ass_data, no_effect=False, only_first_line=False):
         if dialogue['text'].endswith('{\p0}'):  # TODO: Exact match drawing commands.
             index += 1
             continue
-        text = ''.join(_REG_CMD.split(dialogue['text']))      # Remove commands.
-        text = text.replace(r'\N', '\r\n').replace('\\n', '\r\n').replace('&nbsp', ' ')
-        re_del_list = re.findall(r'({.*?}|<front .*?>|</front>)', text)
+        text = dialogue['text']
+        text = text.replace(r'\N', '\r\n').replace(r'\ N', '\r\n').replace('\\n', '\r\n').replace('&nbsp', ' ').replace('&nbsp;', ' ').replace('&lrm;', '').replace('&lrm', '')
+        flag = False
+        re_del_list = re.findall(r'({.*?}|<.*?>$|</.*?>)|(<.*?>)[^>]', text)
         for each_del_str in re_del_list:
-            text = text.replace(each_del_str, '')
+            if each_del_str[0] != '':
+                if len(re.findall(r'\\[a-z]', each_del_str[0])) > 4:
+                    flag = True
+                text = text.replace(each_del_str[0], '').strip()
+            if each_del_str[1] != '':
+                if len(re.findall(r'\\[a-z]', each_del_str[1])) > 4:
+                    flag = True
+                text = text.replace(each_del_str[1], '').strip()
+        if flag is True:
+            index += 1
+            continue
         if only_first_line:
             text = text.split('\r\n', 1)[0]
-        if '' != text.replace('\n', '').replace('\r', '').replace(' ', ''):
-            srt_dialogues.append(StrDialogue(dialogue['start'], dialogue['end'], text))
+        text_split = text.strip().strip('\r\n').strip('\r').strip('\n').split(' ')
+        tmp = []
+        for each in text_split:
+            if each.isalpha() and len(each) == 1:
+                tmp.append(each)
+            elif each.replace('.', '').replace('-', '').isdigit():
+                tmp.append(each)
+        if len(tmp) > 0.7 * len(text_split):     # 该行含有m 0 6.2 -3 l 28.46 18.14 28.38 -8 11.86 0.11 0 0 6.2这种字符串则跳过
+            index += 1
+            continue
+        if len(re.findall('\w+', text.replace('_', ''))) > 0:        # 如果text内容都是非数字字母文字则跳过
+            # srt_dialogues.append(StrDialogue(dialogue['start'], dialogue['end'], text))
+            time_tmp = f"{dialogue['start']}"
+            if time_tmp in time_list:      # 对对白时间去重
+                index += 1
+                continue
+            else:
+                time_list.append(time_tmp)
+            srt_dialogues.append(f"{time_tmp} --> {dialogue['end']}\r\n{text}\r\n")
         index += 1
     if len(srt_dialogues) < 35:
         return 'too little dialogue in this file!  ' + str(len(srt_dialogues))
-    srt_dialogues.sort(key=lambda dialogue: dialogue.time_from.sort_key())
+    # srt_dialogues.sort(key=lambda dialogue: dialogue.time_from.sort_key())
+    srt_dialogues.sort()     # 对白按时间升序排序
     srt_string = ''
-    srt_set = set()      # 去重集合
     i = 1
     for index in range(len(srt_dialogues)):
         if (i in range(1, 12) or index in range(len(srt_dialogues)-20, len(srt_dialogues))) and \
-                check_dialogue(str(srt_dialogues[index]).lower()):
-            continue
-        if str(srt_dialogues[index]) in srt_set:      # 遇到重复则跳过
+                check_dialogue(str(srt_dialogues[index])):
             continue
         srt_string += '{}\r\n{}\r\n'.format(i, str(srt_dialogues[index]))
-        srt_set.add(str(srt_dialogues[index]))
         i += 1
+    if srt_string == '':
+        return 'no dialogue content!!!'
     return srt_string.encode('utf-8')
 
 
@@ -192,6 +206,8 @@ class smiItem(object):
         if self.linecount == 4:
             i = 1
         # 1) convert timestamp
+        if self.end_ms - self.start_ms > 10000:    # 对白持续时间超过10s，仅显示10s
+            self.end_ms = self.start_ms + 10000
         self.start_ts = smiItem.ms2ts(self.start_ms)
         self.end_ts = smiItem.ms2ts(self.end_ms - 10)
         # 2) remove new-line
@@ -201,6 +217,7 @@ class smiItem(object):
         # 4) replace "<br>" with '\r\n';
         self.contents = re.compile(r'(<br>)+', re.IGNORECASE).sub('\r\n', self.contents)
         # 5) find all tags
+        """
         fndx = self.contents.find('<')
         if fndx >= 0:
             contents = self.contents
@@ -214,9 +231,9 @@ class smiItem(object):
                 if m.group(1).lower() in ['b', 'i', 'u']:
                     sb += m.string[0:m.start(2)]
                 sb += m.group(2)
-            self.contents = sb
-        self.contents = self.contents.strip()
-        self.contents = self.contents.strip('\r\n')
+            self.contents = sb"""
+        self.contents = self.contents.strip().strip('\r\n').replace('&nbsp', ' ')
+        self.contents = delete_all_tags(self.contents)
 
     def __repr__(self):
         s = '%d:%d:<%s>:%d' % (self.start_ms, self.end_ms, self.contents, self.linecount)
@@ -262,7 +279,7 @@ def convertSMI(smi_data):
                         last_si.end_ms = first_start + int(m.group(1))  # group下标从1开始
                     else:
                         last_si.end_ms = int(m.group(1))  # group下标从1开始
-                last_si.contents = sync_cont.replace('&nbsp', ' ')
+                last_si.contents = sync_cont
                 srt_list.append(last_si)
                 last_si.linecount = linecnt
             sync_cont = m.group(4)
@@ -291,15 +308,17 @@ def convertSMI(smi_data):
     for index in range(len(srt_list)):
         srt_list[index].convertSrt()
         content = srt_list[index].contents
-        if content is None or '' == content.replace('\n', '').replace('\r', '').replace('\t', '').replace('\xa0', '').replace('&nbsp', ' ').replace(';', ' ').strip():
+        if content is None or len(re.findall('\w+', content.replace('_', ''))) == 0:    # '' == content.replace('\n', '').replace('\r', '').replace('\t', '').replace('\xa0', '').replace('-', '').replace('&nbsp', ' ').replace(';', ' ').strip()
             continue
-        if (ndx in range(1, 12) or index in range(len(srt_list) - 15, len(srt_list))) and check_dialogue(content.lower()):
+        if (ndx in range(1, 12) or index in range(len(srt_list) - 15, len(srt_list))) and check_dialogue(content):
             continue
-        if srt_list[index].end_ms - srt_list[index].start_ms < 50 or srt_list[index].end_ms - srt_list[index].start_ms > 10000:  # 跳过持续时间小于0.05s或大于10s的对白
+        if srt_list[index].end_ms - srt_list[index].start_ms < 15:  # 跳过持续时间小于0.015s的对白
             continue
         sistr = '%d\r\n%s --> %s\r\n%s\r\n\r\n' % (ndx, srt_list[index].start_ts, srt_list[index].end_ts, content)
         result.append(sistr)
         ndx += 1
+    if len(result) == 0:
+        return 'no dialogue content!!!'
     return ''.join(result).encode('utf-8')
 
 
@@ -340,46 +359,56 @@ def convertSUB(sub_data, span=0):
         index += 1
     if frame_rate == 0.0:                   # 若sub文件中没有指定帧速率，则返回23.976、24和25三种帧速率的srt文件
         for i in range(len(lines)):         # 遍历每一行
-            if (line_count in range(1, 12) or i in range(len(lines) - 20, len(lines))) and check_dialogue(lines[i].lower()):
+            if (line_count in range(1, 12) or i in range(len(lines) - 20, len(lines))) and check_dialogue(lines[i]):
                 # line_count = max(0, line_count - 1)
                 continue
-            # line_count += 1
-            try:
-                start_frame, end_frame, text = re.findall("[\{\[].*?(\d+).*?[\}\]] {0,2}[\{\[].*?(\d+).*?[\}\]](.*)$", lines[i])[0]
-            except:
+            result = re.findall("[\{\[].*?(\d+).*?[\}\]] {0,2}[\{\[].*?(\d+).*?[\}\]](.*)$", lines[i])
+            if len(result) != 1:
                 continue
-            if (int(end_frame)-int(start_frame))/25.0 < 0.05 or (int(end_frame)-int(start_frame))/25.0 > 10.0:   # 跳过持续时间小于0.05s或大于10s的对白
+            start_frame, end_frame, text = result[0]
+            if (int(end_frame)-int(start_frame))/25.0 < 0.015:   # 跳过持续时间小于0.015s对白
                 continue
+            elif (int(end_frame)-int(start_frame))/25.0 > 10.0:  # 持续时间大于10s，仅显示10s
+                end_frame = int(start_frame) + 10 * 25
             start_time_23 = frame_to_time(start_frame, 23.976, span)
             end_time_23 = frame_to_time(end_frame, 23.976, span)
             start_time_24 = frame_to_time(start_frame, 24.0, span)
             end_time_24 = frame_to_time(end_frame, 24.0, span)
             start_time_25 = frame_to_time(start_frame, 25.0, span)
             end_time_25 = frame_to_time(end_frame, 25.0, span)
-            if '' != text.replace('\n', '').replace('\r', '').replace('\t', '').replace('\xa0', '').replace('&nbsp', ' ').replace(' ', ''):
-                srt_string_23 += "%d\r\n%s --> %s\r\n%s\r\n\r\n" % (line_count, start_time_23, end_time_23, text.replace("|", "\r\n").replace('&nbsp', ' ').strip())
-                srt_string_24 += "%d\r\n%s --> %s\r\n%s\r\n\r\n" % (line_count, start_time_24, end_time_24, text.replace("|", "\r\n").replace('&nbsp', ' ').strip())
-                srt_string_25 += "%d\r\n%s --> %s\r\n%s\r\n\r\n" % (line_count, start_time_25, end_time_25, text.replace("|", "\r\n").replace('&nbsp', ' ').strip())
+            text = text.replace("|", "\r\n").replace('&nbsp', ' ').strip()
+            text = delete_all_tags(text)
+            if len(re.findall('\w+', text.replace('_', ''))) > 0:   # '' != text.replace('\n', '').replace('\r', '').replace('\t', '').replace('\xa0', '').replace('-', '').replace('&nbsp', ' ').replace(' ', '')
+                srt_string_23 += "%d\r\n%s --> %s\r\n%s\r\n\r\n" % (line_count, start_time_23, end_time_23, text)
+                srt_string_24 += "%d\r\n%s --> %s\r\n%s\r\n\r\n" % (line_count, start_time_24, end_time_24, text)
+                srt_string_25 += "%d\r\n%s --> %s\r\n%s\r\n\r\n" % (line_count, start_time_25, end_time_25, text)
                 line_count += 1
+        if srt_string_23 == '':
+            return 'no dialogue content!!!'
         return [srt_string_23.encode('utf-8'), srt_string_24.encode('utf-8'), srt_string_25.encode('utf-8')]
     else:                                                   # 若sub文件中指定帧速率，返回指定帧速率的srt二进制文件
         # print(index)
         for i in range(index + 1, len(lines)):
-            if (line_count in range(1, 12) or i in range(len(lines) - 20, len(lines))) and check_dialogue(lines[i].lower()):
+            if (line_count in range(1, 12) or i in range(len(lines) - 20, len(lines))) and check_dialogue(lines[i]):
                 # line_count = max(0, line_count - 1)
                 continue
-            # line_count += 1
-            try:
-                start_frame, end_frame, text = re.findall("[\{\[](\d+)[\}\]] {0,2}[\{\[](\d+)[\}\]](.*)$", lines[i])[0]
-            except:
+            result = re.findall("[\{\[].*?(\d+).*?[\}\]] {0,2}[\{\[].*?(\d+).*?[\}\]](.*)$", lines[i])
+            if len(result) != 1:
                 continue
-            if (int(end_frame)-int(start_frame))/frame_rate < 0.05 or (int(end_frame)-int(start_frame))/frame_rate > 10.0:   # 跳过持续时间小于0.05s或大于10s的对白
+            start_frame, end_frame, text = result[0]
+            if (int(end_frame)-int(start_frame))/frame_rate < 0.015:   # 跳过持续时间小于0.015s的对白
                 continue
+            elif (int(end_frame)-int(start_frame))/frame_rate > 10.0:    # 持续时间大于10s，仅显示10s
+                end_frame = int(int(start_frame) + 10 * frame_rate)
             start_time = frame_to_time(start_frame, frame_rate, span)
             end_time = frame_to_time(end_frame, frame_rate, span)
-            if '' != text.replace('\n', '').replace('\r', '').replace('\t', '').replace('\xa0', '').replace('&nbsp', ' ').replace(' ', ''):
-                srt_string += "%d\r\n%s --> %s\r\n%s\r\n\r\n" % (line_count, start_time, end_time, text.replace("|", "\r\n").replace('&nbsp', ' ').strip())
+            text = text.replace("|", "\r\n").replace('&nbsp', ' ').strip()
+            text = delete_all_tags(text)
+            if len(re.findall('\w+', text.replace('_', ''))) > 0:
+                srt_string += "%d\r\n%s --> %s\r\n%s\r\n\r\n" % (line_count, start_time, end_time, text)
                 line_count += 1
+        if srt_string == '':
+            return 'no dialogue content!!!'
         return srt_string.encode('utf-8')
 
 
@@ -392,9 +421,11 @@ def convertSRT(srt_data):    # 标准化srt文件格式
     start_time = 0.0
     time_start_end = ''
     for line in lines:
-        if len(re.findall('^( {0,2}\d+ ?\r)$', line)) == 1:  # 跳过索引
+        if len(re.findall('^( *?\d+ ?\r)$', line)) == 1:  # 跳过索引
             continue
-        g = re.search('^ {0,2}(\d{1,3})[\:\.] ?(\d\d)[\:\.] ?(\d\d)[\,\.\، ] ?(\d{1,3})[ \t]{0,2}[\-\*]{0,3}[ \t]?>[ \t]{0,2}(\d{1,3})[\:\.] ?(\d\d)[\:\.] ?(\d\d)[\,\.\، ] ?(\d{1,3}).*?\r$', line)
+        g = re.search('^ *?(\d{1,3})[\:\.] ?(\d\d)[\:\.] ?(\d\d)[\,\.\، ] ?(\d{1,3})[^\d\:\,\.\،]+(\d{1,3})[\:\.] ?(\d\d)[\:\.] ?(\d\d)[\,\.\، ] ?(\d{1,3}).*?\r$', line)  # 匹配00:00:00,225 --> 00:00:01,538
+        if g is None:
+            g = re.search('^ *?(\d{1,3})[\:\.] ?(\d\d)[\:\.] ?(\d\d)(\d{3})[^\d\:\,\.\،]+(\d{1,3})[\:\.] ?(\d\d)[\:\.] ?(\d\d)(\d{3}).*?\r$', line)    # 匹配00:00:00225 --> 00:00:01538
         if g is not None:
             if is_success:
                 is_success = False
@@ -402,7 +433,9 @@ def convertSRT(srt_data):    # 标准化srt文件格式
                     dialogues = '\r\n'
                 elif not dialogues.endswith('\r\n'):
                     dialogues += '\r\n'
-                content_dict.update({start_time: (time_start_end+dialogues.replace('\t', '').replace('    ', '')+'\r\n')})
+                dialogues = delete_all_tags(dialogues)
+                if len(re.findall('\w+', dialogues.replace('_', ''))) > 0:       # dialogues不能是非数字字母字符串
+                    content_dict.update({start_time: (time_start_end+dialogues.replace('\t', '').replace('    ', '').strip()+'\r\n')})
                 dialogues = ''
             if not g.group(4):    # 毫秒g.group(4)值为''或None
                 start_time = int(g.group(1)[-2:]) * 3600 + int(g.group(2)) * 60 + int(g.group(3))
@@ -423,7 +456,7 @@ def convertSRT(srt_data):    # 标准化srt文件格式
             is_success = True
             continue
         if is_success:
-            if line.replace('\r', '').replace('\n', '').replace('\t', '').replace(' ', '') == '':
+            if len(re.findall('\w+', line.replace('_', ''))) == 0:   # line.replace('\r', '').replace('\n', '').replace('\t', '').replace('-', '').replace(' ', '') == ''
                 continue
             if line.endswith('\r\n'):
                 pass
@@ -438,7 +471,9 @@ def convertSRT(srt_data):    # 标准化srt文件格式
             dialogues = '\r\n'
         elif not dialogues.endswith('\r\n'):
             dialogues += '\r\n'
-        content_dict.update({start_time: (time_start_end+dialogues.replace('\t', '').replace('    ', '')+'\r\n')})
+        dialogues = delete_all_tags(dialogues)
+        if len(re.findall('\w+', dialogues.replace('_', ''))) > 0:  # dialogues不能是非数字字母字符串
+            content_dict.update({start_time: (time_start_end + dialogues.replace('\t', '').replace('    ', '').strip() + '\r\n')})
     if len(time_start_list) < 60 or len(content_dict) < 60:  # 内容太少
         print(len(time_start_list), len(content_dict))
         return 'too little srt file content!!!'
@@ -452,10 +487,12 @@ def convertSRT(srt_data):    # 标准化srt文件格式
             continue
         content_tmp = content_dict[time_start_list[i]]
         if content_tmp is not None:
-            if (index in range(1, 12) or i in range(m-20, m)) and check_dialogue(content_tmp.lower()):
+            if (index in range(1, 12) or i in range(m-20, m)) and check_dialogue(content_tmp):
                 continue
-            content_srt += "%d\r\n%s" % (index, content_tmp)
+            content_srt += "%d\r\n%s\r\n" % (index, content_tmp)
             index += 1
+    if content_srt == '':
+        return 'no dialogue content!!!'
     return content_srt.encode('utf-8')
 
 
@@ -482,7 +519,9 @@ def convertF4(data):                         # 转换00:00:16,.:44,00:00:18,.:72
                     dialogues = '\r\n'
                 elif not dialogues.endswith('\r\n'):
                     dialogues += '\r\n'
-                content_dict.update({start_time: (time_start_end+dialogues.replace('\t', '').replace('    ', '').replace('[br]', '\r\n')+'\r\n')})
+                dialogues = delete_all_tags(dialogues)
+                if len(re.findall('\w+', dialogues.replace('_', ''))) > 0:  # dialogues不能是非数字字母字符串
+                    content_dict.update({start_time: (time_start_end+dialogues.replace('\t', '').replace('    ', '').replace('[br]', '\r\n')+'\r\n')})
                 dialogues = ''
             if not g.group(4):    # 毫秒g.group(4)值为''或None
                 start_time = int(g.group(1)) * 3600 + int(g.group(2)) * 60 + int(g.group(3))
@@ -493,7 +532,7 @@ def convertF4(data):                         # 转换00:00:16,.:44,00:00:18,.:72
                 end_time = int(g.group(5)) * 3600 + int(g.group(6)) * 60 + int(g.group(7))
             else:
                 end_time = int(g.group(5)) * 3600 + int(g.group(6)) * 60 + int(g.group(7)) + int(g.group(8)) / 10**(len(g.group(8)))
-            if end_time - start_time < 0.05:
+            if end_time - start_time < 0.015:
                 continue
             elif end_time - start_time > 10:
                 end_time = start_time + 10
@@ -503,7 +542,7 @@ def convertF4(data):                         # 转换00:00:16,.:44,00:00:18,.:72
             is_success = True
             continue
         if is_success:
-            if lines[j].replace('\r', '').replace('\n', '').replace('\t', '').replace(' ', '') == '':
+            if len(re.findall('\w+', lines[j].replace('_', ''))) == 0:   # lines[j].replace('\r', '').replace('\n', '').replace('\t', '').replace('-', '').replace(' ', '') == ''
                 continue
             if lines[j].endswith('\r\n'):
                 pass
@@ -518,7 +557,9 @@ def convertF4(data):                         # 转换00:00:16,.:44,00:00:18,.:72
             dialogues = '\r\n'
         elif not dialogues.endswith('\r\n'):
             dialogues += '\r\n'
-        content_dict.update({start_time: (time_start_end+dialogues.replace('\t', '').replace('    ', '').replace('[br]', '\r\n')+'\r\n')})
+        dialogues = delete_all_tags(dialogues)
+        if len(re.findall('\w+', dialogues.replace('_', ''))) > 0:  # dialogues不能是非数字字母字符串
+            content_dict.update({start_time: (time_start_end + dialogues.replace('\t', '').replace('    ', '').replace('[br]', '\r\n') + '\r\n')})
     if len(time_start_list) < 60 or len(content_dict) < 60:  # 内容太少
         print(len(time_start_list), len(content_dict))
         return 'too little content in F4!!!'
@@ -532,10 +573,12 @@ def convertF4(data):                         # 转换00:00:16,.:44,00:00:18,.:72
             continue
         content_tmp = content_dict[time_start_list[i]]
         if content_tmp is not None:
-            if (index in range(1, 12) or i in range(m - 20, m)) and check_dialogue(content_tmp.lower()):
+            if (index in range(1, 12) or i in range(m - 20, m)) and check_dialogue(content_tmp):
                 continue
             content_srt += "%d\r\n%s" % (index, content_tmp)
             index += 1
+    if content_srt == '':
+        return 'no dialogue content!!!'
     return content_srt.encode('utf-8')
 
 
@@ -556,7 +599,7 @@ def convertF1(data):                               # 转换例如00:00:17:Vamos,
             this_start = int(g.group(1)) * 3600 + int(g.group(2)) * 60 + int(g.group(3)) + int(g.group(4)) / 10**len(g.group(4))
             start_time_list.append(this_start)
         this_start_copy = copy.deepcopy(this_start)
-        if last_start != -1.0 and last_content is not None and this_start - last_start > 0.05:  # 仅保留持续时间大于0.05s的对白
+        if last_start != -1.0 and last_content is not None and this_start - last_start > 0.015:  # 仅保留持续时间大于0.015s的对白
             time_len = this_start - last_start
             if time_len > 10:
                 this_start = last_start + 10          # 长度大于10s的对白仅显示10s
@@ -566,7 +609,8 @@ def convertF1(data):                               # 转换例如00:00:17:Vamos,
             end_h, end_m, end_s, end_ms = sec_to_time(this_start)
             content_dict.update({last_start: TEMPLATE % (start_h, start_m, start_s, start_ms, end_h, end_m, end_s, end_ms) + last_content + '\r\n'})
         last_content = g.group(5).replace('\r', '').replace('\t', '').replace('|', '\r\n')
-        if last_content == '' or last_content == '\r\n' or last_content == '\r\n\r\n':
+        last_content = delete_all_tags(last_content)
+        if len(re.findall('\w+', last_content.replace('_', ''))) == 0:   # last_content.replace('-', '').strip() == '' or last_content == '\r\n' or last_content == '\r\n\r\n'
             last_content = None
         last_start = this_start_copy
     if last_content is not None:
@@ -585,10 +629,12 @@ def convertF1(data):                               # 转换例如00:00:17:Vamos,
         if start_time_list[i] not in content_dict:
             continue
         content_tmp = content_dict[start_time_list[i]]
-        if (index in range(1, 12) or i in range(m - 20, m)) and check_dialogue(content_tmp.lower()):
+        if (index in range(1, 12) or i in range(m - 20, m)) and check_dialogue(content_tmp):
             continue
         content_srt += "%d\r\n%s\r\n" % (index, content_tmp)
         index += 1
+    if content_srt == '':
+        return 'no dialogue content!!!'
     return content_srt.encode('utf-8')
 
 
@@ -607,10 +653,13 @@ def convertF2(data):                          # 转换[02:14:06]\r\n XXXXXX \r\n
             continue
         elif g is None and i == m-1:
             g = re.search(tmp + '\r\n(.*?)\r\n', raw_str)
-        content = g.group(1).replace('\r', '').replace('\n', '').replace('\t', '').replace('|', '\r\n')
-        if content == '' or content == '\r\n' or content == '\r\n\r\n':
+        if g is None:
             continue
-        elif (index in range(1, 12) or i in range(m - 30, m)) and check_dialogue(content.lower()):
+        content = g.group(1).replace('\r', '').replace('\n', '').replace('\t', '').replace('|', '\r\n')
+        content = delete_all_tags(content)
+        if len(re.findall('\w+', content.replace('_', ''))) == 0:   # content.replace('-', '').strip() == '' or content == '\r\n' or content == '\r\n\r\n'
+            continue
+        elif (index in range(1, 12) or i in range(m - 30, m)) and check_dialogue(content):
             continue
         gs = re.search('\[(\d{1,2})\:(\d\d)\:(\d{1,2})\]', dialogue_list[i])
         if gs is None:
@@ -620,7 +669,7 @@ def convertF2(data):                          # 转换[02:14:06]\r\n XXXXXX \r\n
             end_s = int(g.group(2)) * 3600 + int(g.group(3)) * 60 + int(g.group(4))
         else:      # 最后一个对白无end time
             end_s = start_s + 2    # 默认最后一个对白持续2s
-        if end_s - start_s < 0.05:
+        if end_s - start_s < 0.015:
             continue
         elif end_s - start_s > 10:
             end_s = start_s + 10
@@ -628,6 +677,8 @@ def convertF2(data):                          # 转换[02:14:06]\r\n XXXXXX \r\n
         e_h, e_m, e_s, e_ms = sec_to_time(end_s)
         content_srt += TEMPLATE_WITH_INDEX % (index, s_h, s_m, s_s, 0, e_h, e_m, e_s, 0) + content + '\r\n\r\n'
         index += 1
+    if content_srt == '':
+        return 'no dialogue content!!!'
     return content_srt.encode('utf-8')
 
 
@@ -646,9 +697,10 @@ def convertF3(data):                            # 转换{T 00:00:08:13\r\n XXXXX
         if g is None:
             continue
         content = dialogue_list[i].replace(g.group(1), '').replace('\t', '').replace('{', '').replace('}', '')
-        if content.replace('\r', '').replace('\n', '').replace(' ', '') == '':
+        content = delete_all_tags(content)
+        if len(re.findall('\w+', content.replace('_', ''))) == 0:   # content.replace('\r', '').replace('\n', '').replace('-', '').replace(' ', '') == ''
             continue
-        elif (index in range(1, 12) or i in range(m - 30, m)) and check_dialogue(content.lower()):
+        elif (index in range(1, 12) or i in range(m - 30, m)) and check_dialogue(content):
             continue
         if not g.group(5):
             this_time = int(g.group(2)) * 3600 + int(g.group(3)) * 60 + int(g.group(4))
@@ -656,7 +708,7 @@ def convertF3(data):                            # 转换{T 00:00:08:13\r\n XXXXX
             this_time = int(g.group(2)) * 3600 + int(g.group(3)) * 60 + int(g.group(4)) + int(g.group(5)) / 10**(len(g.group(5)))
         this_time_copy = copy.deepcopy(this_time)
         if last_time != -1.0 and last_dialogue is not None:
-            if this_time - last_time < 0.05:
+            if this_time - last_time < 0.015:
                 continue
             elif this_time - last_time > 10:        # 长度大于10s的对白仅显示10s
                 this_time = last_time + 10
@@ -672,24 +724,29 @@ def convertF3(data):                            # 转换{T 00:00:08:13\r\n XXXXX
     s_h, s_m, s_s, s_ms = sec_to_time(last_time)
     e_h, e_m, e_s, e_ms = sec_to_time(this_time)
     content_srt += TEMPLATE_WITH_INDEX % (index, s_h, s_m, s_s, s_ms, e_h, e_m, e_s, e_ms) + last_dialogue + '\r\n'
+    if content_srt == '':
+        return 'no dialogue content!!!'
     return content_srt.encode('utf-8')
 
 
 def convertF5(data):                        # 将<p begin="00:00:54.221" end="00:00:55.973" XXX> XXXXXXX </p>格式转为srt
-    lines = data.decode('utf-8').split('\n')
+    lines = re.findall('\<p\r?\n? *?begin="\d{1,2}\:\d{2}\:\d{2}[\.\:\,]\d{1,3}"\r?\n? *?end="\d{1,2}\:\d{2}\:\d{2}[\.\:\,]\d{1,3}".*?\<\/p\>', data.decode('utf-8'), re.DOTALL)  # re.DOTALL表示使.也匹配换行符
     index = 1
     content_srt = ''
     m = len(lines)
     for i in range(m):
-        g = re.search('\<p begin="(\d{1,2})\:(\d{2})\:(\d{2})[\.\:\,](\d{1,3})" end="(\d{1,2})\:(\d{2})\:(\d{2})[\.\:\,](\d{1,3})".*?\>(.*?)\<\/p\>', lines[i])
+        g = re.search('\<p\r?\n? *?begin="(\d{1,2})\:(\d{2})\:(\d{2})[\.\:\,](\d{1,3})"\r?\n? *?end="(\d{1,2})\:(\d{2})\:(\d{2})[\.\:\,](\d{1,3})".*?\>\r?\n? *?(.*?)\r?\n? *?\<\/p\>', lines[i], re.DOTALL)  # re.DOTALL表示使.也匹配换行符
         if g is None:
             continue
-        content = g.group(9).replace('\r', '').replace('\n', '').replace('\t', '').replace('<br />', '\r\n').replace('<br/>', '\r\n').replace('<br>', '\r\n').replace('<br >', '\r\n').replace('&nbsp', ' ').strip()
-        if content == '' or content == '\r\n' or content == '\r\n\r\n':
+        content = g.group(9)
+        if content is None:
             continue
-        elif (index in range(1, 12) or i in range(m - 20, m)) and check_dialogue(content.lower()):
+        content = content.replace('\r', '').replace('\n', '').replace('\t', '').replace('<br />', '\r\n').replace('<br/>', '\r\n').replace('<br>', '\r\n').replace('<br >', '\r\n').replace('&nbsp', ' ').strip()
+        if len(re.findall('\w+', content.replace('_', ''))) == 0:   # content.replace('-', '').strip() == '' or content == '\r\n' or content == '\r\n\r\n'
             continue
-        tag_element = re.findall('\<.*?\>', content)
+        elif (index in range(1, 12) or i in range(m - 20, m)) and check_dialogue(content):
+            continue
+        tag_element = re.findall('<.*?>', content, re.DOTALL)
         for each_tag in tag_element:
             content = content.replace(each_tag, '')   # 去掉标签，例如<span>
         if not g.group(4):     # 毫秒g.group(4)值为''或None
@@ -700,7 +757,7 @@ def convertF5(data):                        # 将<p begin="00:00:54.221" end="00
             end_time = int(g.group(5)) * 3600 + int(g.group(6)) * 60 + int(g.group(7))
         else:
             end_time = int(g.group(5)) * 3600 + int(g.group(6)) * 60 + int(g.group(7)) + int(g.group(8)) / 10**(len(g.group(8)))
-        if end_time - start_time < 0.05:
+        if end_time - start_time < 0.015:
             continue
         elif end_time - start_time > 10:
             end_time = start_time + 10
@@ -710,6 +767,8 @@ def convertF5(data):                        # 将<p begin="00:00:54.221" end="00
         index += 1
     if index < 60:
         return 'too little dialogue content in F5!!!   ' + str(index)
+    if content_srt == '':
+        return 'no dialogue content!!!'
     return content_srt.encode('utf-8')
 
 
@@ -732,7 +791,9 @@ def convertF6(srt_data):    # 转换00:14.800 --> 00:18.840\n XXXXXX 到srt
                     dialogues = '\r\n'
                 elif not dialogues.endswith('\r\n'):
                     dialogues += '\r\n'
-                content_dict.update({start_time: (time_start_end+dialogues.replace('\t', '').replace('    ', '')+'\r\n')})
+                dialogues = delete_all_tags(dialogues)
+                if len(re.findall('\w+', dialogues.replace('_', ''))) > 0:
+                    content_dict.update({start_time: (time_start_end + dialogues.replace('\t', '').replace('    ', '')+'\r\n')})
                 dialogues = ''
             if not g.group(3):    # 毫秒g.group(3)值为''或None
                 start_time = int(g.group(1)) * 60 + int(g.group(2))
@@ -743,7 +804,7 @@ def convertF6(srt_data):    # 转换00:14.800 --> 00:18.840\n XXXXXX 到srt
                 end_time = int(g.group(4)) * 60 + int(g.group(5))
             else:
                 end_time = int(g.group(4)) * 60 + int(g.group(5)) + int(g.group(6)) / 10**(len(g.group(6)))
-            if end_time - start_time < 0.05:
+            if end_time - start_time < 0.015:
                 continue
             elif end_time - start_time > 10:
                 end_time = start_time + 10
@@ -753,7 +814,7 @@ def convertF6(srt_data):    # 转换00:14.800 --> 00:18.840\n XXXXXX 到srt
             is_success = True
             continue
         if is_success:
-            if line.replace('\r', '').replace('\n', '').replace('\t', '').replace(' ', '') == '':
+            if len(re.findall('\w+', line.replace('_', ''))) == 0:  # line.replace('\r', '').replace('\n', '').replace('\t', '').replace('-', '').replace(' ', '') == ''
                 continue
             if line.endswith('\r\n'):
                 pass
@@ -768,7 +829,9 @@ def convertF6(srt_data):    # 转换00:14.800 --> 00:18.840\n XXXXXX 到srt
             dialogues = '\r\n'
         elif not dialogues.endswith('\r\n'):
             dialogues += '\r\n'
-        content_dict.update({start_time: (time_start_end+dialogues.replace('\t', '').replace('    ', '')+'\r\n')})
+        dialogues = delete_all_tags(dialogues)
+        if len(re.findall('\w+', dialogues.replace('_', ''))) > 0:
+            content_dict.update({start_time: (time_start_end + dialogues.replace('\t', '').replace('    ', '')+'\r\n')})
     if len(time_start_list) < 60 or len(content_dict) < 60:  # 内容太少
         print(len(time_start_list), len(content_dict))
         return 'too little srt file content!!!'
@@ -782,10 +845,12 @@ def convertF6(srt_data):    # 转换00:14.800 --> 00:18.840\n XXXXXX 到srt
             continue
         content_tmp = content_dict[time_start_list[i]]
         if content_tmp is not None:
-            if (index in range(1, 12) or i in range(m-20, m)) and check_dialogue(content_tmp.lower()):
+            if (index in range(1, 12) or i in range(m-20, m)) and check_dialogue(content_tmp):
                 continue
             content_srt += "%d\r\n%s" % (index, content_tmp)
             index += 1
+    if content_srt == '':
+        return 'no dialogue content!!!'
     return content_srt.encode('utf-8')
 
 
@@ -801,7 +866,7 @@ def check(data):
     elif ('[INFORMATION]' in raw_str and '[TITLE]' in raw_str and '[END INFORMATION]' in raw_str) or \
             (len(re.findall('(\d{1,2}\:\d\d\:\d\d[\.\:\,]\d{1,3}\,\d{1,2}\:\d\d\:\d\d[\.\:\,]\d{1,3})\r', raw_str)) > 60):   # 转换00:00:16,.:44,00:00:18,.:72\r\n XXXXXX \r\n格式到srt
         return convertF4(data)
-    elif len(re.findall('\<p begin="\d{1,2}\:\d{2}\:\d{2}[\.\:\,]\d{1,3}" end="\d{1,2}\:\d{2}\:\d{2}[\.\:\,]\d{1,3}".*?\<\/p\>', raw_str)) > 60:  # 将<p begin="00:00:54.221" end="00:00:55.973" XXX> XXXXXXX </p>格式转为srt
+    elif len(re.findall('\<p\r?\n? *?begin="\d{1,2}\:\d{2}\:\d{2}[\.\:\,]\d{1,3}"\r?\n? *?end="\d{1,2}\:\d{2}\:\d{2}[\.\:\,]\d{1,3}".*?\<\/p\>', raw_str, re.DOTALL)) > 60:  # 将<p begin="00:00:54.221" end="00:00:55.973" XXX> XXXXXXX </p>格式转为srt
         return convertF5(data)
     elif len(re.findall(r'(\n {0,2}\d{1,2}[\:\.] ?\d\d[\,\.\،] ?\d{1,3} {0,2}[\*\-]{1,3} ?> {0,2}\d{1,2}[\:\.] ?\d\d[\,\.\،] ?\d{1,3} ?.*?\r?\n.*?\r?\n)', raw_str)) > 60:
         return convertF6(data)
@@ -817,8 +882,10 @@ def check_file_format(data):
         return 'smi'
     elif len(re.findall(r'([\{\[].*?\d+.*?[\}\]] {0,2}[\{\[].*?\d+.*?[\}\]])', raw_str)) > len(raw_str.split('\n')) * 0.9:
         return 'sub'
-    re_list = re.findall(r'(\n {0,2}\d{1,3}[\:\.] ?\d\d[\:\.] ?\d\d[\,\.\، ] ?\d{1,3}[ \t]{0,2}[\*\-]{0,3}[ \t]?>[ \t]{0,2}\d{1,3}[\:\.] ?\d\d[\:\.] ?\d\d[\,\.\، ] ?\d{1,3} ?.*?\r?\n.*?\r?\n)', raw_str)
+    re_list = re.findall(r'(\n *?\d{1,3}[\:\.] ?\d\d[\:\.] ?\d\d[\,\.\، ] ?\d{1,3}[^\d\:\,\.\،]+\d{1,3}[\:\.] ?\d\d[\:\.] ?\d\d[\,\.\، ] ?\d{1,3} ?.*?\r?\n.*?\r?\n)', raw_str)  # 匹配00:00:00,225 --> 00:00:01,538
     if len(re_list) > 60:
+        return 'srt'
+    elif len(re.findall(r'(\n *?\d{1,3}[\:\.] ?\d\d[\:\.] ?\d{5}[^\d\:\,\.\،]+\d{1,3}[\:\.] ?\d\d[\:\.] ?\d{5} ?.*?\r?\n.*?\r?\n)', raw_str)) > 60:   # 匹配00:00:00225 --> 00:00:01538
         return 'srt'
     elif len(re.findall(r'(\d{1,2}\:\d\d\:\d{1,2}[\:\.\,]\d{0,3})\D', raw_str)) > len(raw_str.split('\n')) * 0.9:
         return 'other'
@@ -830,7 +897,7 @@ def check_file_format(data):
     elif ('[INFORMATION]' in raw_str and '[TITLE]' in raw_str and '[END INFORMATION]' in raw_str) or \
             (len(re.findall('(\d{1,2}\:\d\d\:\d\d[\.\:\,]\d{1,3}\,\d{1,2}\:\d\d\:\d\d[\.\:\,]\d{1,3})\r', raw_str)) > 60):
         return 'other'
-    elif len(re.findall('\<p begin="\d{1,2}\:\d{2}\:\d{2}[\.\:\,]\d{1,3}" end="\d{1,2}\:\d{2}\:\d{2}[\.\:\,]\d{1,3}".*?\<\/p\>', raw_str)) > 60:
+    elif len(re.findall('\<p\r?\n? *?begin="\d{1,2}\:\d{2}\:\d{2}[\.\:\,]\d{1,3}"\r?\n? *?end="\d{1,2}\:\d{2}\:\d{2}[\.\:\,]\d{1,3}".*?\<\/p\>', raw_str, re.DOTALL)) > 60:   # re.DOTALL表示使.也匹配换行符
         return 'other'
     elif len(re.findall(r'(\n {0,2}\d{1,2}[\:\.] ?\d\d[\,\.\،] ?\d{1,3} {0,2}[\*\-]{1,3} ?> {0,2}\d{1,2}[\:\.] ?\d\d[\,\.\،] ?\d{1,3} ?.*?\r?\n.*?\r?\n)', raw_str)) > 60:
         return 'other'
